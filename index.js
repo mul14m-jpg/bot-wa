@@ -516,28 +516,43 @@ async function connectToWhatsApp() {
         defaultQueryTimeoutMs: 60000
     });
 
-    // ─── Pairing Code otomatis dengan delay 6 detik ───────────
-    if (!conn.authState.creds.registered) {
-        setTimeout(async () => {
-            try {
-                const botNum = config.botNumber.replace(/[^0-9]/g, '');
-                const code   = await conn.requestPairingCode(botNum);
-                const fmt    = code.match(/.{1,4}/g)?.join('-') || code;
-                console.log('\n\x1b[1m\x1b[33m╔══════════════════════════╗\x1b[0m');
-                console.log('\x1b[1m\x1b[33m║   KODE PAIRING ANDA      ║\x1b[0m');
-                console.log(`\x1b[1m\x1b[32m║       ${fmt}       ║\x1b[0m`);
-                console.log('\x1b[1m\x1b[33m╚══════════════════════════╝\x1b[0m\n');
-            } catch (e) {
-                console.error('[PAIRING ERROR]', e.message);
+    // ─── Pairing Code: minta setelah koneksi stabil ──────────
+    let pairingRequested = false;
+    const requestPairing = async (retries = 0) => {
+        if (pairingRequested || conn.authState.creds.registered) return;
+        try {
+            const botNum = config.botNumber.replace(/[^0-9]/g, '');
+            pairingRequested = true;
+            const code = await conn.requestPairingCode(botNum);
+            const fmt  = code.match(/.{1,4}/g)?.join('-') || code;
+            console.log('\n\x1b[1m\x1b[33m╔══════════════════════════╗\x1b[0m');
+            console.log('\x1b[1m\x1b[33m║   KODE PAIRING ANDA      ║\x1b[0m');
+            console.log(`\x1b[1m\x1b[32m║       ${fmt}       ║\x1b[0m`);
+            console.log('\x1b[1m\x1b[33m╚══════════════════════════╝\x1b[0m\n');
+        } catch (e) {
+            pairingRequested = false;
+            console.error('[PAIRING ERROR]', e.message);
+            if (retries < 5) {
+                console.log(`[PAIRING] Retry ke-${retries + 1} dalam 15 detik...`);
+                setTimeout(() => requestPairing(retries + 1), 15000);
+            } else {
+                console.log('[PAIRING] Gagal 5x. Bot akan restart...');
+                process.exit(1);
             }
-        }, 6000);
-    }
+        }
+    };
 
     // ─── Koneksi update ──────────────────────────────────────
     conn.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect } = update;
 
+        if (connection === 'open' && !conn.authState.creds.registered) {
+            console.log('[PAIRING] Koneksi stabil, meminta kode pairing dalam 5 detik...');
+            setTimeout(() => requestPairing(), 5000);
+        }
+
         if (connection === 'close') {
+            pairingRequested = false;
             const shouldReconnect =
                 lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
             console.log('[CONN] Koneksi terputus.', shouldReconnect ? 'Mencoba reconnect...' : 'Sesi logout.');
