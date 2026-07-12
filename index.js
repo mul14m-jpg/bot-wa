@@ -14,8 +14,46 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 const ffmpeg = require('fluent-ffmpeg');
+const http = require('http');
 
 const settings = require('./settings.js');
+
+// =============================================
+// HTTP KEEPALIVE SERVER
+// Wajib untuk Railway, Pterodactyl, Heroku, dll
+// agar platform tahu bot masih berjalan (tidak dianggap crash)
+// =============================================
+const PORT = process.env.PORT || 3000;
+const httpServer = http.createServer((req, res) => {
+    if (req.url === '/health' || req.url === '/') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            status: 'online',
+            bot: settings.botName,
+            uptime: process.uptime().toFixed(0) + 's',
+            timestamp: new Date().toISOString()
+        }));
+    } else {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Not Found');
+    }
+});
+httpServer.listen(PORT, () => {
+    console.log(`[HTTP] Keepalive server aktif di port ${PORT}`);
+});
+
+// =============================================
+// RECONNECT STATE — exponential backoff
+// Mencegah reconnect loop tak terbatas di Railway/VPS
+// =============================================
+let reconnectAttempt = 0;
+const MAX_RECONNECT_DELAY = 60000;
+
+function getReconnectDelay() {
+    const delay = Math.min(5000 * Math.pow(1.5, reconnectAttempt), MAX_RECONNECT_DELAY);
+    reconnectAttempt++;
+    return delay;
+}
 
 // =============================================
 // DETEKSI TERMUX ANDROID OTOMATIS
@@ -776,24 +814,26 @@ async function startBot() {
         const { connection, lastDisconnect } = update;
         if (connection === 'close') {
             const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
-            console.log('[KONEKSI] Terputus, alasan kode:', reason);
+            console.log(`[KONEKSI] Terputus. Kode: ${reason} | Percobaan reconnect ke-${reconnectAttempt + 1}`);
+
             if (reason === DisconnectReason.badSession) {
-                console.log('[KONEKSI] Sesi rusak. Hapus folder auth_session dan restart.');
-            } else if (
-                reason === DisconnectReason.connectionClosed ||
-                reason === DisconnectReason.connectionLost ||
-                reason === DisconnectReason.connectionReplaced ||
-                reason === DisconnectReason.timedOut
-            ) {
-                console.log('[KONEKSI] Mencoba reconnect...');
-                startBot();
+                console.log('[KONEKSI] ❌ Sesi rusak. Hapus folder auth_session lalu restart bot.');
+                process.exit(1);
             } else if (reason === DisconnectReason.loggedOut) {
-                console.log('[KONEKSI] Bot logout. Hapus auth_session dan restart.');
+                console.log('[KONEKSI] ❌ Bot logout. Hapus folder auth_session lalu restart bot.');
+                process.exit(1);
+            } else if (reason === DisconnectReason.forbidden) {
+                console.log('[KONEKSI] ❌ Akses ditolak WhatsApp. Coba ganti nomor bot.');
+                process.exit(1);
             } else {
-                console.log('[KONEKSI] Alasan tidak dikenal, mencoba reconnect...');
-                startBot();
+                const delay = getReconnectDelay();
+                console.log(`[KONEKSI] ⏳ Reconnect dalam ${(delay / 1000).toFixed(1)} detik...`);
+                setTimeout(() => startBot(), delay);
             }
+        } else if (connection === 'connecting') {
+            console.log('[KONEKSI] 🔄 Menghubungkan ke WhatsApp...');
         } else if (connection === 'open') {
+            reconnectAttempt = 0;
             console.log(`\n✅ [ONLINE] ${settings.botName} berhasil terhubung ke WhatsApp!\n`);
         }
     });
